@@ -1,0 +1,397 @@
+<html>
+    <head>
+        <title>DanIdle</title>
+        <script src="include/jquery.js"               type="text/javascript"></script>
+        <script src="include/json2.js"                type="text/javascript"></script>
+        <script src="include/tippy.all.min.js"        type="text/javascript"></script>
+        <script src="include/mapmanager_oldmethod.js" type="text/javascript"></script>
+        <script src="include/activeblock.js"          type="text/javascript"></script>
+        <script src="include/block_leanto.js"         type="text/javascript"></script>
+        <script src="include/block_foragepost.js"     type="text/javascript"></script>
+        <script src="include/block_rockknapper.js"    type="text/javascript"></script>
+        <script src="include/block_storage.js"        type="text/javascript"></script>
+        <script src="include/block_twinemaker.js"     type="text/javascript"></script>
+        <script src="include/block_stickmaker.js"     type="text/javascript"></script>
+        <script src="include/block_flinttoolshop.js"  type="text/javascript"></script>
+        <script src="include/block_huntingpost.js"    type="text/javascript"></script>
+        <link rel="stylesheet" type="text/css" href="include/style.css" />
+        <script type="text/javascript">
+            
+            // Task list
+            // 2) Add weight and size stats to all the items we have. Factor that into the amount of space a given storage unit can hold.
+            // 2) Determine why tool colors don't change to grey when the tools become available (if this has even been built into the system yet).
+            // 2) Figure out how to make fire to be important for survival.  Users will need to set up a campfire and provide it with continuous
+            //      firewood, early in the game
+            // 3) Get the item hauler block setup & working
+            // 5) Build the campfire, allow players to cook meats. They can be consumed from there
+            // 6) Add code to manage population based on food availability
+            // 7) Add code to restrict work completable per tick based on number of workers
+            // 8) Allow foraging posts to forage for seeds and other non-edible things. Do this only after a farming hoe has been built
+            // 9) Build farming land plots
+            // 10) 
+
+            // Why not flint wood planar?  Flint cannot be knapped precisely enough to produce a straight edge, which is needed for a planar
+            
+            // Things for players to build (that should be added)
+            // Stick boat - A boat consisting of a line of sticks, tied together with twine. Uses another large stick to push the boat around.  Suitable for fishing, but
+            //              doesn't work in deep waters or any currents
+            // Wood pick-shovel - A shovel (of sorts) consisting only of 1 large stick. Can be used to spread gravel
+            // Wood sled - A slidable sled of sorts consisting of a line of sticks and a long handle, wheels not required. Good for carrying semi-heavy loads
+            
+            let mapkinddensity = 10;
+            let chunksize = 32;
+            
+            // Let's start by making building the chunk list
+            let chunklist = 0;
+            let cursorselect = '';
+            let blockselect = null;
+            let tutorialstage = 0;
+            let unlockeditems = []; // Keeps track of various items the player has unlocked (by way of finishing crafting them).
+            
+            let blocklist = []; // In order to manage functioning blocks, we will still need a list of blocks. We will use this to manage the updates of all blocks
+            blocklist.lastpriority = function() {
+                if(blocklist.length==0) return 0;
+                return blocklist[blocklist.length-1].priority;
+            }
+            blocklist.findOnGrid = function(xpos, ypos) {  // Returns an Activeblock based on its coordinates
+                for(let i=0; i<blocklist.length; i++) {
+                    if((blocklist[i].tile.xpos==xpos) && (blocklist[i].tile.ypos==ypos)) {
+                        return blocklist[i];
+                    }
+                }
+            }
+            blocklist.getById = function(id) {
+                for(let i=0; i<blocklist.length; i++) {
+                    if(blocklist[i].id==id) return blocklist[i];
+                }
+            }
+            blocklist.findInStorage = function(targetitem, pickup) {
+                for(let i=0; i<blocklist.length; i++) {
+                    if(blocklist[i].name=='Storage') {
+                        for(let j=0; j<blocklist[i].onhand.length; j++) {
+                            if(blocklist[i].onhand[j].name==targetitem) {
+                                if(pickup==1) {
+                                    return blocklist[i].onhand.splice(j, 1)[0];
+                                    // Why even write an interface in the storage block for this one operation?  We can just swipe our target tool here
+                                }else{
+                                    return 1;
+                }   }   }   }   }
+                if(pickup==1) return null;
+                return 0;
+            }
+
+
+            let panellist = []; // This manages the panels on the left side of the screen
+            
+            let lastblockid = 0;
+            let maptileid = 0;
+
+            function getRandomFrom(choicelist) {
+                // Selects a random item from a list of choices.
+                // choicelist - list of objects to select from
+                // Example useage: myfood = randomfrom(['apple', 'mushroom', 'berry', 'treenut']); has 1 in 4 chance to return berry
+                return choicelist[Math.floor(Math.random()*choicelist.length)];
+            }
+
+            function multireplace(workstring, target, replacewith) {
+                // Works like string.replace(), but replaces all instances, instead of just one.
+                // We need this function to turn output options (which is full item names with spaces) into DOM ids (which cannot contain spaces)
+                let updated = workstring.replace(target, replacewith);
+                while(updated!=workstring) {
+                    workstring = updated;
+                    updated = workstring.replace(target, replacewith);
+                }
+                return updated;
+            }
+            
+            $(document).ready(function() {
+                // Start by generating the visible blocks to select from
+                // Any item with a blank unlock-item will be unlocked at the start of the game
+                new panel('selector',      'img/cursormove.png',       'Selection: Highlight items and center screen',               []);
+                new panel('storage',       'img/storage.png',          'Storage; Store items (like tools)',                          []);
+                new panel('hauler',        'img/bucketline_right.png', 'Item hauler: Move items between blocks',                     []);
+                new panel('leanto',        'img/leanto.png',           'Lean-to: Basic shelter of sticks and leaves',                []);
+                new panel('foragepost',    'img/foragepost.png',       'Forage Post; College food from surrounding lands',           []);
+                new panel('rockknapper',   'img/rockknapper.png',      'Rock Knapper; Smash rocks into basic tools',                 []);
+                new panel('twinemaker',    'img/twinemaker.png',       'Twine maker; cuts bark from trees to make rope',             [['Flint Knife']]);
+                new panel('stickmaker',    'img/stickmaker.png',       'Stick maker; cuts branches from trees to make sticks',       [['Flint Stabber']]);
+                new panel('flinttoolshop', 'img/flinttoolset.png',     'Flint Toolshop; makes larger tools from flint, wood, twine', [['Twine'], ['Short Stick', 'Long Stick']]);
+                new panel('huntingpost',   'img/huntingpost.png',      'Hunting post. Hunts for animals in local area. Outputs dead animals', [['Flint Spear']]);
+                $("#blockselector").html('');
+                findunlocks('');
+                
+                // Now generate a tile map so we can fill it out
+                // 1 = grass
+                // 3 = forest
+                // 4 = rocks
+                // 5 = water
+                $("#game").html('');
+                new mapchunk(0,0);
+                
+                setInterval(updateblocks, 1000);
+            });
+            
+            function updateblocks() {
+                // Runs through each block and runs an update function
+                //console.log('We have '+ blocklist.length +' blocks to update');
+                for(let i=0; i<blocklist.length; i++) {
+                    blocklist[i].update();
+                }
+                if(blockselect!=null) {
+                    blockselect.updatepanel();
+                }
+            }
+            
+            function setcursor(newcursor) {
+                $("#cursor"+ cursorselect).css("background-color", "white");
+                $("#cursor"+ newcursor).css("background-color", "red");
+                cursorselect = newcursor;
+                checktutorial("cursor="+ newcursor);
+            }
+
+            function findunlocks() {
+                // Searches through the list of panels we have and determines if any of them can be unlocked.
+                // The deciding factor on this will be elements that are in the unlockeditems array
+                
+                for(let i=0; i<panellist.length; i++) {
+                    if(panellist[i].state==0) {
+                        if(panellist[i].unlockitem.length==0) {  // This has no requirements to unlock (these are game-start items)
+                            dounlock(i);  // go ahead and handle this case
+                            continue;
+                        } 
+                        let state = 1;
+                        for(let j=0; j<panellist[i].unlockitem.length; j++) {  // this is the AND grouping
+                            let substate = 0;
+                            for(let k=0; k<panellist[i].unlockitem[j].length; k++) { // this is the OR grouping
+                                if(unlockeditems.indexOf(panellist[i].unlockitem[j][k])!=-1) {
+                                    substate = 1;
+                                    continue;
+                                }
+                            }
+                            if(substate==0) {
+                                state = 0;
+                                continue;
+                            }
+                        }
+                        if(state==1) dounlock(i);
+                    }
+                }
+            }
+
+            function dounlock(target) {
+                // Handles the actual unlock process, since findunlocks() has mutiple success cases
+                panellist[target].state = 1;
+                $("#blockselector").append('<div id="cursor'+ panellist[target].name +'" '+
+                                                'class="blockchoice" '+
+                                                'onclick="setcursor(\''+ panellist[target].name +'\')" '+
+                                                'title="'+ panellist[target].tooltip +'"> '+
+                                                '<img src="'+ panellist[target].image +'" /> '+
+                                            '</div>');
+            }
+
+            function checktutorial(action) {
+                // Manages advancing the tutorial, when & where possible
+                console.log('Checking tutorial: '+ action);
+                switch(tutorialstage) {
+                    case 0:
+                        if(action=="cursor=selector") {
+                            tutorialstage = 1;
+                            $("#tutorialblock").html('Step 2: Shelter. Find a wide area of grass with neighboring trees. Place a lean-to at the '+
+                                                     'edge of the trees. You\'ll need two for your 4 current colonists');
+                        }
+                    break;
+                    case 1:
+                        if(action=="build=leanto") {
+                            tutorialstage = 2;
+                            $("#tutorialblock").html('Step 3: Food. Place a foraging post in a nearby grass area');
+                        }
+                    break;
+                    case 2:
+                        if(action=="build=foragepost") {
+                            tutorialstage = 3;
+                            $("#tutorialblock").html('Step 4: Tools. Find a rock area and place a Rock Knapper. Start building Flint Knives and '+
+                                                     'Stabbers (you may want 2 Rock Knappers)');
+                        }
+                    break;
+                    case 3:
+                        if(action=="build=rockknapper") {
+                            tutorialstage = 4;
+                            $("#tutorialblock").html('Step 5: Tool Storage. Place a Storage unit beside your Rock Knapper. Set it to receive the '+
+                                                     'tool you are crafting. Only when it is in storage can another block use it.');
+                        }
+                    break;
+                }
+            }
+            
+            function handlegameboxclick(xpos, ypos) {
+                // Handles clicks on the 'open map'. Now that we have a map, we can handle input directly from those blocks
+                let mappos = chunklist[0][0].map[ypos][xpos];
+                //console.log('Got position ['+ xpos +','+ ypos +'], land type='+ mappos.tile +', id='+ mappos.id);
+                if(cursorselect=="selector") {
+                    $("#game").css("top",  (330-(ypos*66)) +"px");
+                    $("#game").css("left", (330-(xpos*66)) +"px");
+                    if(mappos.structure!=null) {
+                        blockselect = mappos.structure;
+                        blockselect.drawpanel();
+                    }
+                    return;
+                }
+                if(mappos.structure==null) {
+                    let r = null;
+                    switch(cursorselect) {
+                        case "storage":
+                            if(mappos.tile==4) {
+                                console.log('Cannot build a storage unit on water. Try someplace else');
+                                return;
+                            }
+                            r = new storage(mappos);
+                            checktutorial('build=storage');
+                        break;
+                        case "leanto":
+                            // First structure for players to build (now).
+                            if(mappos.tile!=2) {
+                                console.log('Cannot build a leanto here, it is not forest');
+                                return;
+                            }
+                            r = new leanto(mappos);
+                            checktutorial("build=leanto");
+                        break;
+                        case "foragepost":
+                            // First source of food for players
+                            if(mappos.tile!=1) {
+                                console.log('Cannot build a foraging post here, it is not grass');
+                                return;
+                            }
+                            r = new foragepost(mappos);
+                            checktutorial('build=foragepost');
+                        break;
+                        case 'rockknapper':
+                            if(mappos.tile!=3) {
+                                console.log('Cannot build a rock knapper here, it is not open rocks');
+                                return;
+                            }
+                            r = new rockknapper(mappos);
+                            checktutorial("build=rockknapper");
+                        break;
+                        case 'twinemaker':
+                            if(mappos.tile!=2) {
+                                console.log('Cannot build a twine maker here, it is not forest');
+                                return;
+                            }
+                            r = new twinemaker(mappos);
+                            checktutorial("build=twinemaker");
+                        break;
+                        case 'stickmaker':
+                            if(mappos.tile!=2) {
+                                console.log('Cannot build a stick maker here, it is not forest');
+                                return;
+                            }
+                            r = new stickmaker(mappos);
+                            checktutorial("build=stickmaker");
+                        break;
+                        case 'flinttoolshop':
+                            if(mappos.tile==4) {
+                                console.log('Cannot build a flint toolshop in water. Try somewhere else');
+                                return;
+                            }
+                            r = new flinttoolshop(mappos);
+                            checktutorial('build=flinttoolshop');
+                        break;
+                        case 'huntingpost':
+                            if(mappos.tile!=1) {
+                                console.log('Cannot build huntingpost here, it is not a grassy area');
+                                return;
+                            }
+                            r = new huntingpost(mappos);
+                            checktutorial('build=huntingpost');
+                        break;
+                    }
+                    // Once this is set up, we also want to select this block (and display it), so the user can see what's going on with it
+                    if(mappos.structure!=null) {
+                        blockselect = mappos.structure;
+                        blockselect.drawpanel();
+                    }
+                    return;
+                }
+                // Here, we have clicked on an existing building. Make it the selected building, and show its sidepanel content
+                blockselect = mappos.structure;
+                blockselect.drawpanel();
+            }
+            
+            class panel {
+                // Used to display options on the left, allowing us to keep later ones locked until key items are available
+                // For any blocks that should show up at the start of the game, we can simply provide an unlock item of ''.
+                constructor(panelid, imagepath, tooltip, unlockitem) {
+                    this.name = panelid;
+                    this.image = imagepath;
+                    this.tooltip = tooltip;
+                    this.unlockitem = unlockitem;
+                    this.state = 0;
+                    panellist.push(this);  // A global list of panels that can be used
+                }
+            }
+            
+            class item {
+                constructor(name, efficiency=0, endurance=0) {
+                    this.name = name;
+                    if(unlockeditems.indexOf(name)==-1) unlockeditems.push(name);
+                        // We will manage unlocking items - and blocks - from here, instead of doing it from each of the blocks
+                    findunlocks(name);
+                    
+                    // Now, for every item we have, we want a general description with it.
+                    switch(this.name) {
+                        case 'apple': this.description = 'Apple from a nearby tree. Will be consumed by your colonists'; break;
+                        case 'mushroom': this.description = 'Edible mushrooms from the nearby lands. Will be consumed by your colonists'; break;
+                        case 'berry': this.description = 'Edible berries of various types from nearby lands. Will be consumed by your colonists'; break;
+                        case 'treenut': this.description = 'Edible nuts from local trees. Will be consumed by your colonists'; break;
+                        case 'Flint Knife': this.description = 'Crude knife made of flint, sharpened from a rock. Good for light cuts'; this.endurance=100; this.efficiency=1; break;
+                        case 'Flint Stabber': this.description = 'Crude blunt point, a hand tool made of flint. Good for cutting into tree branches'; this.endurance=100; this.efficiency=1; break;
+                        case 'Twine': this.description = 'Natural twine, a crude rope. Good for light-duty purposes'; break;
+                        case 'Flint Hatchet': this.description = 'Hatchet with a flint head. Good for cutting down small to medium trees'; this.endurance=100; this.efficiency=1.5; break;
+                        case 'Flint Hoe': this.description = 'Farming hoe with a flint head. Good for light duty soil tilling'; this.endurance=100; this.efficiency=1; break;
+                        case 'Flint Spear': this.description = 'Spear with a flint head. Good for light hunting and defense'; this.endurance=100; this.efficiency=1; break;
+                        case 'Twine Table': this.description = 'Crude table. Good for light loads and minor work'; this.endurance=100; this.efficiency=1; break;
+                        case 'Twine Sled': this.decription = 'Crude sled. Good for hauling light loads'; this.endurance=100; this.efficiency=1; break;
+                        case 'Twine Raft': this.description = 'Crude raft. Good for moving light loads over water'; this.endurance=100; this.efficiency=1; break;
+                        case 'default': this.description = 'This item needs a description'; break;
+                    }
+                    if(efficiency!=0) this.efficiency = efficiency;  // Not every item will make use of efficiency or endurance
+                    if(endurance!=0)  this.endurance = endurance;
+                }
+            }
+            
+
+        </script>
+    </head>
+    <body>
+        <div style="display:flex; justify-content: center; width:100%;">
+            <div style="max-width:205px;">
+                <div>
+                    Idle: <span id="showpopulation">3/4</span>  Food: <span id="showfood">0</span><br />
+                    Lvngqtr: <span id="showlivingspace">0</span>  Clthng: <span id="showclothing">0</span><br />
+                    <a href="#" onclick="savegame()">Save Game</a> / <a href="#" onclick="loadgame()">Load Game</a><br />
+                </div>
+                <br />
+                <div id="blockselector">
+                    Waiting for startup...
+                </div>
+            </div>
+            <div style="flex-grow:100; justify-content:center; overflow:hidden; align-items:center; height:100%; position:relative">
+                <div id="tutorialblock" style="padding:6px; border:2px solid; border-color:red; background-color:white; z-index:1; position:absolute; top:6px; left:6px;">
+                    Welcome! I'll help you get started. Step 1: Select the cursor tool. Click the map to re-center
+                </div>
+                <div id="game">
+                    Building map...
+                </div>
+            </div>
+            <div style="width:200px; margin-left:10px;">
+                <div id="sidepanel">Waiting for selection...</div>
+            </div>
+        </div>
+
+    </body>
+</html>
+
+
+
+
